@@ -23,11 +23,12 @@ import io.grpc.stub.StreamObserver;
 import io.grpc.testing.GrpcCleanupRule;
 import java.io.IOException;
 import org.apache.skywalking.oap.server.core.CoreModule;
-import org.apache.skywalking.oap.server.core.remote.annotation.StreamDataClassGetter;
 import org.apache.skywalking.oap.server.core.remote.data.StreamData;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.*;
 import org.apache.skywalking.oap.server.core.worker.*;
 import org.apache.skywalking.oap.server.library.module.*;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.*;
 import org.apache.skywalking.oap.server.testing.module.*;
 import org.junit.*;
 
@@ -43,22 +44,43 @@ public class RemoteServiceHandlerTestCase {
 
     @Test
     public void callTest() throws DuplicateProviderException, ProviderNotFoundException, IOException {
-        final int streamDataClassId = 1;
-        final int testWorkerId = 1;
+        final String testWorkerId = "mock-worker";
 
         ModuleManagerTesting moduleManager = new ModuleManagerTesting();
         ModuleDefineTesting moduleDefine = new ModuleDefineTesting();
         moduleManager.put(CoreModule.NAME, moduleDefine);
 
-        StreamDataClassGetter classGetter = mock(StreamDataClassGetter.class);
-        Class<?> dataClass = TestRemoteData.class;
-        when(classGetter.findClassById(streamDataClassId)).thenReturn((Class<StreamData>)dataClass);
+        WorkerInstancesService workerInstancesService = new WorkerInstancesService();
+        moduleDefine.provider().registerServiceImplementation(IWorkerInstanceGetter.class, workerInstancesService);
+        moduleDefine.provider().registerServiceImplementation(IWorkerInstanceSetter.class, workerInstancesService);
 
-        moduleDefine.provider().registerServiceImplementation(StreamDataClassGetter.class, classGetter);
-
-        WorkerInstances.INSTANCES.put(testWorkerId, new TestWorker());
+        TestWorker worker = new TestWorker(moduleManager);
+        workerInstancesService.put(testWorkerId, worker, TestRemoteData.class);
 
         String serverName = InProcessServerBuilder.generateName();
+        MetricsCreator metricsCreator = mock(MetricsCreator.class);
+        when(metricsCreator.createCounter(any(), any(), any(), any())).thenReturn(new CounterMetrics() {
+            @Override public void inc() {
+
+            }
+
+            @Override public void inc(double value) {
+
+            }
+        });
+        when(metricsCreator.createHistogramMetric(any(), any(), any(), any())).thenReturn(new HistogramMetrics() {
+            @Override public Timer createTimer() {
+                return super.createTimer();
+            }
+
+            @Override public void observe(double value) {
+
+            }
+        });
+
+        ModuleDefineTesting telemetryModuleDefine = new ModuleDefineTesting();
+        moduleManager.put(TelemetryModule.NAME, telemetryModuleDefine);
+        telemetryModuleDefine.provider().registerServiceImplementation(MetricsCreator.class, metricsCreator);
 
         gRPCCleanup.register(InProcessServerBuilder
             .forName(serverName).directExecutor().addService(new RemoteServiceHandler(moduleManager)).build().start());
@@ -81,8 +103,7 @@ public class RemoteServiceHandlerTestCase {
         });
 
         RemoteMessage.Builder remoteMessage = RemoteMessage.newBuilder();
-        remoteMessage.setStreamDataId(streamDataClassId);
-        remoteMessage.setNextWorkerId(testWorkerId);
+        remoteMessage.setNextWorkerName(testWorkerId);
 
         RemoteData.Builder remoteData = RemoteData.newBuilder();
         remoteData.addDataStrings("test1");
@@ -126,8 +147,8 @@ public class RemoteServiceHandlerTestCase {
 
     static class TestWorker extends AbstractWorker {
 
-        public TestWorker() {
-            super(1);
+        public TestWorker(ModuleDefineHolder moduleDefineHolder) {
+            super(moduleDefineHolder);
         }
 
         @Override public void in(Object o) {

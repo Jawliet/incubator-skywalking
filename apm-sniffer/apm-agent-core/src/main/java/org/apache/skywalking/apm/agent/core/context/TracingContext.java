@@ -20,8 +20,11 @@ package org.apache.skywalking.apm.agent.core.context;
 
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.skywalking.apm.agent.core.boot.ServiceManager;
 import org.apache.skywalking.apm.agent.core.conf.Config;
+import org.apache.skywalking.apm.agent.core.conf.RemoteDownstreamConfig;
 import org.apache.skywalking.apm.agent.core.context.trace.AbstractSpan;
 import org.apache.skywalking.apm.agent.core.context.trace.AbstractTracingSpan;
 import org.apache.skywalking.apm.agent.core.context.trace.EntrySpan;
@@ -81,14 +84,23 @@ public class TracingContext implements AbstractTracerContext {
     private int spanIdGenerator;
 
     /**
+     * The counter indicates
+     */
+    private volatile AtomicInteger asyncSpanCounter;
+    private volatile boolean isRunningInAsyncMode;
+    private volatile ReentrantLock asyncFinishLock;
+
+    private volatile boolean running;
+
+    /**
      * Initialize all fields with default value.
      */
     TracingContext() {
         this.segment = new TraceSegment();
         this.spanIdGenerator = 0;
-        if (samplingService == null) {
-            samplingService = ServiceManager.INSTANCE.findService(SamplingService.class);
-        }
+        samplingService = ServiceManager.INSTANCE.findService(SamplingService.class);
+        isRunningInAsyncMode = false;
+        running = true;
     }
 
     /**
@@ -313,6 +325,11 @@ public class TracingContext implements AbstractTracerContext {
      */
     @Override
     public AbstractSpan createExitSpan(final String operationName, final String remotePeer) {
+        if (isLimitMechanismWorking()) {
+            NoopExitSpan span = new NoopExitSpan(remotePeer);
+            return push(span);
+        }
+
         AbstractSpan exitSpan;
         AbstractSpan parentSpan = peek();
         if (parentSpan != null && parentSpan.isExit()) {
@@ -324,10 +341,6 @@ public class TracingContext implements AbstractTracerContext {
                     new PossibleFound.FoundAndObtain() {
                         @Override
                         public Object doProcess(final int peerId) {
-                            if (isLimitMechanismWorking()) {
-                                return new NoopExitSpan(peerId);
-                            }
-
                             return DictionaryManager.findEndpointSection()
                                 .findOnly(segment.getServiceId(), operationName)
                                 .doInCondition(
@@ -347,10 +360,6 @@ public class TracingContext implements AbstractTracerContext {
                     new PossibleFound.NotFoundAndObtain() {
                         @Override
                         public Object doProcess() {
-                            if (isLimitMechanismWorking()) {
-                                return new NoopExitSpan(remotePeer);
-                            }
-
                             return DictionaryManager.findEndpointSection()
                                 .findOnly(segment.getServiceId(), operationName)
                                 .doInCondition(
@@ -392,7 +401,7 @@ public class TracingContext implements AbstractTracerContext {
      * @param span to finish
      */
     @Override
-    public void stopSpan(AbstractSpan span) {
+    public boolean stopSpan(AbstractSpan span) {
         AbstractSpan lastSpan = peek();
         if (lastSpan == span) {
             if (lastSpan instanceof AbstractTracingSpan) {
@@ -407,9 +416,28 @@ public class TracingContext implements AbstractTracerContext {
             throw new IllegalStateException("Stopping the unexpected span = " + span);
         }
 
-        if (activeSpanStack.isEmpty()) {
-            this.finish();
+        finish();
+
+        return activeSpanStack.isEmpty();
+    }
+
+    @Override public AbstractTracerContext awaitFinishAsync() {
+        if (!isRunningInAsyncMode) {
+            synchronized (this) {
+                if (!isRunningInAsyncMode) {
+                    asyncFinishLock = new ReentrantLock();
+                    asyncSpanCounter = new AtomicInteger(0);
+                    isRunningInAsyncMode = true;
+                }
+            }
         }
+        asyncSpanCounter.addAndGet(1);
+        return this;
+    }
+
+    @Override public void asyncStop(AsyncSpan span) {
+        asyncSpanCounter.addAndGet(-1);
+        finish();
     }
 
     /**
@@ -417,19 +445,42 @@ public class TracingContext implements AbstractTracerContext {
      * TracingContext.ListenerManager}
      */
     private void finish() {
-        TraceSegment finishedSegment = segment.finish(isLimitMechanismWorking());
-        /**
-         * Recheck the segment if the segment contains only one span.
-         * Because in the runtime, can't sure this segment is part of distributed trace.
-         *
-         * @see {@link #createSpan(String, long, boolean)}
-         */
-        if (!segment.hasRef() && segment.isSingleSpanSegment()) {
-            if (!samplingService.trySampling()) {
-                finishedSegment.setIgnore(true);
+        if (isRunningInAsyncMode) {
+            asyncFinishLock.lock();
+        }
+        try {
+            if (activeSpanStack.isEmpty() && running && (!isRunningInAsyncMode || asyncSpanCounter.get() == 0)) {
+                TraceSegment finishedSegment = segment.finish(isLimitMechanismWorking());
+                /*
+                 * Recheck the segment if the segment contains only one span.
+                 * Because in the runtime, can't sure this segment is part of distributed trace.
+                 *
+                 * @see {@link #createSpan(String, long, boolean)}
+                 */
+                if (!segment.hasRef() && segment.isSingleSpanSegment()) {
+                    if (!samplingService.trySampling()) {
+                        finishedSegment.setIgnore(true);
+                    }
+                }
+
+                /*
+                 * Check that the segment is created after the agent (re-)registered to backend,
+                 * otherwise the segment may be created when the agent is still rebooting and should
+                 * be ignored
+                 */
+                if (segment.createTime() < RemoteDownstreamConfig.Agent.INSTANCE_REGISTERED_TIME) {
+                    finishedSegment.setIgnore(true);
+                }
+
+                TracingContext.ListenerManager.notifyFinish(finishedSegment);
+
+                running = false;
+            }
+        } finally {
+            if (isRunningInAsyncMode) {
+                asyncFinishLock.unlock();
             }
         }
-        TracingContext.ListenerManager.notifyFinish(finishedSegment);
     }
 
     /**

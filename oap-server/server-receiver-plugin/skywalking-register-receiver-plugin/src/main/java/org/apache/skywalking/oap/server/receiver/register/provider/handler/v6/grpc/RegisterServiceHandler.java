@@ -18,13 +18,16 @@
 
 package org.apache.skywalking.oap.server.receiver.register.provider.handler.v6.grpc;
 
+import com.google.gson.JsonObject;
 import io.grpc.stub.StreamObserver;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.skywalking.apm.network.common.Commands;
 import org.apache.skywalking.apm.network.common.KeyIntValuePair;
 import org.apache.skywalking.apm.network.common.KeyStringValuePair;
 import org.apache.skywalking.apm.network.register.v2.EndpointMapping;
 import org.apache.skywalking.apm.network.register.v2.EndpointMappingElement;
-import org.apache.skywalking.apm.network.register.v2.Enpoints;
+import org.apache.skywalking.apm.network.register.v2.Endpoints;
 import org.apache.skywalking.apm.network.register.v2.NetAddressMapping;
 import org.apache.skywalking.apm.network.register.v2.NetAddresses;
 import org.apache.skywalking.apm.network.register.v2.RegisterGrpc;
@@ -47,17 +50,21 @@ import org.apache.skywalking.oap.server.core.register.service.IServiceInventoryR
 import org.apache.skywalking.oap.server.core.source.DetectPoint;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.server.grpc.GRPCHandler;
-import org.apache.skywalking.oap.server.library.util.StringUtils;
-import org.apache.skywalking.oap.server.receiver.register.provider.handler.v5.grpc.InstanceDiscoveryServiceHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.skywalking.oap.server.core.register.ServiceInstanceInventory.PropertyUtil.HOST_NAME;
+import static org.apache.skywalking.oap.server.core.register.ServiceInstanceInventory.PropertyUtil.IPV4S;
+import static org.apache.skywalking.oap.server.core.register.ServiceInstanceInventory.PropertyUtil.LANGUAGE;
+import static org.apache.skywalking.oap.server.core.register.ServiceInstanceInventory.PropertyUtil.OS_NAME;
+import static org.apache.skywalking.oap.server.core.register.ServiceInstanceInventory.PropertyUtil.PROCESS_NO;
 
 /**
  * @author wusheng
  */
 public class RegisterServiceHandler extends RegisterGrpc.RegisterImplBase implements GRPCHandler {
 
-    private static final Logger logger = LoggerFactory.getLogger(InstanceDiscoveryServiceHandler.class);
+    private static final Logger logger = LoggerFactory.getLogger(RegisterServiceHandler.class);
 
     private final ServiceInventoryCache serviceInventoryCache;
     private final ServiceInstanceInventoryCache serviceInstanceInventoryCache;
@@ -82,7 +89,7 @@ public class RegisterServiceHandler extends RegisterGrpc.RegisterImplBase implem
             if (logger.isDebugEnabled()) {
                 logger.debug("Register service, service code: {}", serviceName);
             }
-            int serviceId = serviceInventoryRegister.getOrCreate(serviceName);
+            int serviceId = serviceInventoryRegister.getOrCreate(serviceName, null);
 
             if (serviceId != Const.NONE) {
                 KeyIntValuePair value = KeyIntValuePair.newBuilder().setKey(serviceName).setValue(serviceId).build();
@@ -102,34 +109,42 @@ public class RegisterServiceHandler extends RegisterGrpc.RegisterImplBase implem
         request.getInstancesList().forEach(instance -> {
             ServiceInventory serviceInventory = serviceInventoryCache.get(instance.getServiceId());
 
-            ServiceInstanceInventory.AgentOsInfo agentOsInfo = new ServiceInstanceInventory.AgentOsInfo();
+            JsonObject instanceProperties = new JsonObject();
+            List<String> ipv4s = new ArrayList<>();
+
             for (KeyStringValuePair property : instance.getPropertiesList()) {
                 String key = property.getKey();
                 switch (key) {
-                    case "OSName":
-                        agentOsInfo.setOsName(property.getValue());
+                    case HOST_NAME:
+                        instanceProperties.addProperty(HOST_NAME, property.getValue());
                         break;
-                    case "hostname":
-                        agentOsInfo.setHostname(property.getValue());
+                    case OS_NAME:
+                        instanceProperties.addProperty(OS_NAME, property.getValue());
+                        break;
+                    case LANGUAGE:
+                        instanceProperties.addProperty(LANGUAGE, property.getValue());
                         break;
                     case "ipv4":
-                        agentOsInfo.getIpv4s().add(property.getValue());
+                        ipv4s.add(property.getValue());
                         break;
-                    case "ProcessNo":
-                        agentOsInfo.setProcessNo(Integer.parseInt(property.getValue()));
+                    case PROCESS_NO:
+                        instanceProperties.addProperty(PROCESS_NO, property.getValue());
                         break;
+                    default:
+                        instanceProperties.addProperty(key, property.getValue());
                 }
             }
+            instanceProperties.addProperty(IPV4S, ServiceInstanceInventory.PropertyUtil.ipv4sSerialize(ipv4s));
 
             String instanceName = serviceInventory.getName();
-            if (agentOsInfo.getProcessNo() != 0) {
-                instanceName += "-pid:" + agentOsInfo.getProcessNo();
+            if (instanceProperties.has(PROCESS_NO)) {
+                instanceName += "-pid:" + instanceProperties.get(PROCESS_NO).getAsString();
             }
-            if (StringUtils.isNotEmpty(agentOsInfo.getHostname())) {
-                instanceName += "@" + agentOsInfo.getHostname();
+            if (instanceProperties.has(HOST_NAME)) {
+                instanceName += "@" + instanceProperties.get(HOST_NAME).getAsString();
             }
 
-            int serviceInstanceId = serviceInstanceInventoryRegister.getOrCreate(instance.getServiceId(), instanceName, instance.getInstanceUUID(), instance.getTime(), agentOsInfo);
+            int serviceInstanceId = serviceInstanceInventoryRegister.getOrCreate(instance.getServiceId(), instanceName, instance.getInstanceUUID(), instance.getTime(), instanceProperties);
 
             if (serviceInstanceId != Const.NONE) {
                 logger.info("register service instance id={} [UUID:{}]", serviceInstanceId, instance.getInstanceUUID());
@@ -141,7 +156,7 @@ public class RegisterServiceHandler extends RegisterGrpc.RegisterImplBase implem
         responseObserver.onCompleted();
     }
 
-    @Override public void doEndpointRegister(Enpoints request, StreamObserver<EndpointMapping> responseObserver) {
+    @Override public void doEndpointRegister(Endpoints request, StreamObserver<EndpointMapping> responseObserver) {
         EndpointMapping.Builder builder = EndpointMapping.newBuilder();
 
         request.getEndpointsList().forEach(endpoint -> {
@@ -168,7 +183,7 @@ public class RegisterServiceHandler extends RegisterGrpc.RegisterImplBase implem
         NetAddressMapping.Builder builder = NetAddressMapping.newBuilder();
 
         request.getAddressesList().forEach(networkAddress -> {
-            int addressId = networkAddressInventoryRegister.getOrCreate(networkAddress);
+            int addressId = networkAddressInventoryRegister.getOrCreate(networkAddress, null);
 
             if (addressId != Const.NONE) {
                 builder.addAddressIds(KeyIntValuePair.newBuilder().setKey(networkAddress).setValue(addressId));
@@ -205,7 +220,7 @@ public class RegisterServiceHandler extends RegisterGrpc.RegisterImplBase implem
                     return;
                 }
 
-                networkAddressId = networkAddressInventoryRegister.getOrCreate(address);
+                networkAddressId = networkAddressInventoryRegister.getOrCreate(address, null);
                 if (networkAddressId == Const.NONE) {
                     return;
                 }

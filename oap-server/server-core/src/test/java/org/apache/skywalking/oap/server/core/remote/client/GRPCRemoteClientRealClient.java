@@ -19,13 +19,21 @@
 package org.apache.skywalking.oap.server.core.remote.client;
 
 import java.util.concurrent.TimeUnit;
-import org.apache.skywalking.oap.server.core.remote.annotation.StreamDataClassGetter;
 import org.apache.skywalking.oap.server.core.remote.data.StreamData;
 import org.apache.skywalking.oap.server.core.remote.grpc.proto.RemoteData;
 import org.apache.skywalking.oap.server.core.worker.AbstractWorker;
+import org.apache.skywalking.oap.server.library.module.ModuleDefineHolder;
+import org.apache.skywalking.oap.server.telemetry.TelemetryModule;
+import org.apache.skywalking.oap.server.telemetry.api.CounterMetrics;
+import org.apache.skywalking.oap.server.telemetry.api.MetricsCreator;
+import org.apache.skywalking.oap.server.testing.module.ModuleDefineTesting;
+import org.apache.skywalking.oap.server.testing.module.ModuleManagerTesting;
 import org.junit.Assert;
 
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
 
 /**
  * @author peng-yongsheng
@@ -34,27 +42,30 @@ public class GRPCRemoteClientRealClient {
 
     public static void main(String[] args) throws InterruptedException {
         Address address = new Address("localhost", 10000, false);
-        GRPCRemoteClient remoteClient = spy(new GRPCRemoteClient(new TestClassGetter(), address, 1, 10));
+        ModuleManagerTesting moduleManager = new ModuleManagerTesting();
+        MetricsCreator metricsCreator = mock(MetricsCreator.class);
+        when(metricsCreator.createCounter(any(), any(), any(), any())).thenReturn(new CounterMetrics() {
+            @Override public void inc() {
+
+            }
+
+            @Override public void inc(double value) {
+
+            }
+        });
+        ModuleDefineTesting telemetryModuleDefine = new ModuleDefineTesting();
+        moduleManager.put(TelemetryModule.NAME, telemetryModuleDefine);
+        telemetryModuleDefine.provider().registerServiceImplementation(MetricsCreator.class, metricsCreator);
+
+        GRPCRemoteClient remoteClient = spy(new GRPCRemoteClient(moduleManager, address, 1, 10, 10));
         remoteClient.connect();
 
         for (int i = 0; i < 10000; i++) {
-            remoteClient.push(1, new TestStreamData());
+            remoteClient.push("mock_remote", new TestStreamData());
             TimeUnit.SECONDS.sleep(1);
         }
 
         TimeUnit.MINUTES.sleep(10);
-    }
-
-    public static class TestClassGetter implements StreamDataClassGetter {
-
-        @Override public int findIdByClass(Class streamDataClass) {
-            return 1;
-        }
-
-        @Override public Class<StreamData> findClassById(int id) {
-            Class<?> clazz = TestStreamData.class;
-            return (Class<StreamData>)clazz;
-        }
     }
 
     public static class TestStreamData extends StreamData {
@@ -78,8 +89,8 @@ public class GRPCRemoteClientRealClient {
 
     static class TestWorker extends AbstractWorker {
 
-        public TestWorker(int workerId) {
-            super(workerId);
+        public TestWorker(ModuleDefineHolder moduleDefineHolder) {
+            super(moduleDefineHolder);
         }
 
         @Override public void in(Object o) {

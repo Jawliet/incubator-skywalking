@@ -25,7 +25,8 @@ import org.apache.skywalking.oap.server.core.source.Segment;
 import org.apache.skywalking.oap.server.core.source.SourceReceiver;
 import org.apache.skywalking.oap.server.library.module.ModuleManager;
 import org.apache.skywalking.oap.server.library.util.BooleanUtils;
-import org.apache.skywalking.oap.server.library.util.TimeBucketUtils;
+import org.apache.skywalking.oap.server.core.analysis.TimeBucket;
+import org.apache.skywalking.oap.server.receiver.trace.provider.TraceServiceModuleConfig;
 import org.apache.skywalking.oap.server.receiver.trace.provider.parser.decorator.SegmentCoreInfo;
 import org.apache.skywalking.oap.server.receiver.trace.provider.parser.decorator.SpanDecorator;
 import org.apache.skywalking.oap.server.receiver.trace.provider.parser.listener.EntrySpanListener;
@@ -67,10 +68,11 @@ public class SegmentSpanListener implements FirstSpanListener, EntrySpanListener
             return;
         }
 
-        long timeBucket = TimeBucketUtils.INSTANCE.getSecondTimeBucket(segmentCoreInfo.getStartTime());
+        long timeBucket = TimeBucket.getRecordTimeBucket(segmentCoreInfo.getStartTime());
 
         segment.setSegmentId(segmentCoreInfo.getSegmentId());
         segment.setServiceId(segmentCoreInfo.getServiceId());
+        segment.setServiceInstanceId(segmentCoreInfo.getServiceInstanceId());
         segment.setLatency((int)(segmentCoreInfo.getEndTime() - segmentCoreInfo.getStartTime()));
         segment.setStartTime(segmentCoreInfo.getStartTime());
         segment.setEndTime(segmentCoreInfo.getEndTime());
@@ -144,7 +146,7 @@ public class SegmentSpanListener implements FirstSpanListener, EntrySpanListener
             this.sampler = new TraceSegmentSampler(segmentSamplingRate);
         }
 
-        @Override public SpanListener create(ModuleManager moduleManager) {
+        @Override public SpanListener create(ModuleManager moduleManager, TraceServiceModuleConfig config) {
             return new SegmentSpanListener(moduleManager, sampler);
         }
     }

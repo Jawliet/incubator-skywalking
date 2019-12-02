@@ -19,12 +19,19 @@
 package org.apache.skywalking.oap.server.core.alarm.provider;
 
 import java.io.*;
+
+import org.apache.skywalking.oap.server.configuration.api.ConfigurationModule;
+import org.apache.skywalking.oap.server.configuration.api.DynamicConfigurationService;
 import org.apache.skywalking.oap.server.core.CoreModule;
 import org.apache.skywalking.oap.server.core.alarm.*;
 import org.apache.skywalking.oap.server.library.module.*;
 import org.apache.skywalking.oap.server.library.util.ResourceUtils;
 
 public class AlarmModuleProvider extends ModuleProvider {
+
+    private NotifyHandler notifyHandler;
+    private AlarmRulesWatcher alarmRulesWatcher;
+
     @Override public String name() {
         return "default";
     }
@@ -46,19 +53,24 @@ public class AlarmModuleProvider extends ModuleProvider {
         }
         RulesReader reader = new RulesReader(applicationReader);
         Rules rules = reader.readRules();
-        NotifyHandler notifyHandler = new NotifyHandler(rules);
+
+        alarmRulesWatcher = new AlarmRulesWatcher(rules, this);
+
+        notifyHandler = new NotifyHandler(alarmRulesWatcher);
         notifyHandler.init(new AlarmStandardPersistence());
-        this.registerServiceImplementation(IndicatorNotify.class, notifyHandler);
+        this.registerServiceImplementation(MetricsNotify.class, notifyHandler);
     }
 
     @Override public void start() throws ServiceNotProvidedException, ModuleStartException {
+        DynamicConfigurationService dynamicConfigurationService = getManager().find(ConfigurationModule.NAME).provider().getService(DynamicConfigurationService.class);
+        dynamicConfigurationService.registerConfigChangeWatcher(alarmRulesWatcher);
     }
 
     @Override public void notifyAfterCompleted() throws ServiceNotProvidedException, ModuleStartException {
-
+        notifyHandler.initCache(getManager());
     }
 
     @Override public String[] requiredModules() {
-        return new String[] {CoreModule.NAME};
+        return new String[] {CoreModule.NAME, ConfigurationModule.NAME};
     }
 }
